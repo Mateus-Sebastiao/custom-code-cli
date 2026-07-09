@@ -140,7 +140,11 @@ class CustomCodeAgent {
     });
   }
 
-  public async processMessage(userInput: string, onToolExecution: (log: string) => void): Promise<string | null> {
+  public async processMessage(
+    userInput: string,
+    onToolExecution: (log: string) => void,
+    askPermission: (cmd: string) => Promise<boolean>
+  ): Promise<string | null> {
     this.memory.push({ role: 'user', content: userInput });
 
     try {
@@ -163,16 +167,21 @@ class CustomCodeAgent {
           const { name: functionName, arguments: rawArgs } = toolCall.function;
           const registeredTool = AGENT_TOOLS[functionName];
 
-          if (!registeredTool) {
-            this.memory.push({ role: 'tool', tool_call_id: toolCall.id, content: `Error: ${functionName} not found.` });
-            continue;
+          if (registeredTool) {
+            const parsedArgs = JSON.parse(rawArgs);
+
+            if (functionName === 'runCommand') {
+              const allowed = await askPermission(parsedArgs.command);
+              if (!allowed) {
+                this.memory.push({ role: 'tool', tool_call_id: toolCall.id, content: "Aborted by human: Security permission denied." });
+                continue;
+              }
+            }
+
+            onToolExecution(`⚙️ Tool Call Approved: ${functionName}()`);
+            const result = await registeredTool.execute(parsedArgs);
+            this.memory.push({ role: 'tool', tool_call_id: toolCall.id, content: result });
           }
-
-          const parsedArgs = JSON.parse(rawArgs);
-          onToolExecution(`⚡ Triggered: ${functionName}()`);
-
-          const result = await registeredTool.execute(parsedArgs);
-          this.memory.push({ role: 'tool', tool_call_id: toolCall.id, content: result });
         }
       }
     } catch (error) {
@@ -182,78 +191,87 @@ class CustomCodeAgent {
 }
 
 // ==========================================
-// 4. INK UI TERMINAL APPLICATION
+// 4. INK REACT UI APPLICATION ENVIRONMENT
 // ==========================================
 const agent = new CustomCodeAgent();
 
 function CustomCodeConsole() {
   const { exit } = useApp();
   const [query, setQuery] = useState('');
+  const [status, setStatus] = useState<'idle' | 'thinking' | 'security_gate'>('idle');
   const [logs, setLogs] = useState<string[]>([]);
-  const [status, setStatus] = useState<'idle' | 'thinking' | 'executing_tool'>('idle');
-  const [agentResponse, setAgentResponse] = useState<string | null>(null);
+  const [pendingCommand, setPendingCommand] = useState<string>('');
+  const [permissionInput, setPermissionInput] = useState('');
+  const [permissionResolver, setPermissionResolver] = useState<((val: boolean) => void) | null>(null);
 
-  const handleSubmit = async (value: string) => {
-    if (value.trim().toLowerCase() === 'exit') {
-      exit();
-      process.exit();
-    }
-
+  const handleMainSubmit = async (value: string) => {
+    if (value.trim().toLowerCase() === 'exit') { exit(); process.exit(); }
     if (!value.trim()) return;
 
     setQuery('');
-    setAgentResponse(null);
-    setLogs([`User: ${value}`]);
+    setLogs([`User ➔ ${value}`]);
     setStatus('thinking');
 
-    const response = await agent.processMessage(value, (toolLog) => {
-      setStatus('executing_tool');
-      setLogs((prev) => [...prev, toolLog]);
-    });
+    const response = await agent.processMessage(
+      value,
+      (log) => setLogs((prev) => [...prev, log]),
+      (command) => {
+        return new Promise((resolve) => {
+          setPendingCommand(command);
+          setStatus('security_gate');
+          setPermissionResolver(() => resolve);
+        });
+      }
+    );
 
-    setAgentResponse(response);
+    setLogs((prev) => [...prev, `\nCustom-Code ➔ ${response}`]);
     setStatus('idle');
   };
 
+  const handlePermissionSubmit = (value: string) => {
+    const isAllowed = value.trim().toLowerCase() === 'y';
+    setPermissionInput('');
+    if (permissionResolver) {
+      permissionResolver(isAllowed);
+    }
+  };
+
   return (
-    <Box flexDirection="column" padding={1} borderStyle="round" borderColor="cyan">
-      {/* HEADER BANNER */}
+    <Box flexDirection="column" padding={1} borderStyle="round" borderColor="magenta">
       <Box marginBottom={1}>
-        <Text color="magenta" bold>=====| CUSTOM-CODE CLI |=====</Text>
+        <Text color="cyan" bold>=== CUSTOM-CODE CLI V1.0.0 (INK INTERACTIVE) ===</Text>
       </Box>
 
-      {/* STATUS INDICATOR */}
       <Box marginBottom={1}>
-        <Text bold>System Status: </Text>
-        {status === 'idle' && <Text color="green">● Online - Ready</Text>}
-        {status === 'thinking' && <Text color="yellow">⏳ Processing neural graph...</Text>}
-        {status === 'executing_tool' && <Text color="blue">⚙️ Autonomous System Tool Execution</Text>}
+        <Text bold>Status: </Text>
+        {status === 'idle' && <Text color="green">● Online & Ready</Text>}
+        {status === 'thinking' && <Text color="yellow">⏳ Processing neural graph matrix...</Text>}
+        {status === 'security_gate' && <Text color="red">⚠️ AWAITING SECURITY AUTHORIZATION</Text>}
       </Box>
 
-      {/* REAL-TIME SYSTEM LOGS */}
-      {logs.map((log, index) => (
-        <Box key={index} paddingLeft={1}>
-          <Text color="gray">{log}</Text>
+      {logs.map((log, idx) => (
+        <Box key={idx} paddingLeft={1}>
+          <Text color="white">{log}</Text>
         </Box>
       ))}
 
-      {/* AGENT FINAL RESPONSE BOX */}
-      {agentResponse && (
-        <Box marginTop={1} padding={1} borderStyle="single" borderColor="green" flexDirection="column">
-          <Text color="green" bold>Custom-Code ➔</Text>
-          <Text color="white">{agentResponse}</Text>
+      {status === 'security_gate' && (
+        <Box flexDirection="column" marginTop={1} padding={1} borderStyle="single" borderColor="red">
+          <Text color="red" bold>SECURITY WARN: The Agent wants to execute a host command:</Text>
+          <Text color="yellow" italic>   $ {pendingCommand}</Text>
+          <Box marginTop={1}>
+            <Text color="white">Allow execution? (y/n) ➔ </Text>
+            <TextInput value={permissionInput} onChange={setPermissionInput} onSubmit={handlePermissionSubmit} />
+          </Box>
         </Box>
       )}
 
-      {/* INTERACTIVE TEXT INPUT PROMPT */}
-      <Box marginTop={1}>
-        <Text color="magenta" bold>[Custom-Code] ➔ </Text>
-        {status === 'idle' ? (
-          <TextInput value={query} onChange={setQuery} onSubmit={handleSubmit} />
-        ) : (
-          <Text color="gray">System locked until process completes...</Text>
-        )}
-      </Box>
+      {status === 'idle' && (
+        <Box marginTop={1}>
+          <Text color="magenta" bold>[Custom-Code] ➔ </Text>
+          <TextInput value={query} onChange={setQuery} onSubmit={handleMainSubmit} />
+        </Box>
+      )}
     </Box>
   );
 }
